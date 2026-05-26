@@ -33,7 +33,8 @@ Total time: about 30–45 minutes the first time. No prior experience needed.
    into the editor, and click **Run**. This creates your tables, security rules,
    and the photo storage bucket. You should see "Success".
    (If you set up an earlier version of this app, just run the script again — it
-   safely adds the new expiration and history columns without touching your data.)
+   safely adds the new expiration, history, and household/sharing tables without
+   touching your existing data.)
 4. In the left sidebar, open **Project Settings** (gear) → **API**.
    Copy two values — you'll need them in Part 2:
    - **Project URL** (looks like `https://abcd1234.supabase.co`)

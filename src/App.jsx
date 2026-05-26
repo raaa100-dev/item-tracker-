@@ -2,9 +2,11 @@ import React, { useEffect, useState, useRef } from 'react'
 import { supabase } from './supabaseClient'
 import Auth from './Auth.jsx'
 import {
-  fetchContainers, upsertContainer, deleteContainer,
+  fetchContainers, upsertContainer, deleteContainer, moveContainer,
   fetchSettings, saveSettings, uploadPhoto, deletePhoto,
   createBlankContainers,
+  fetchHouseholds, createHousehold, joinHouseholdByCode,
+  fetchMembers, leaveHousehold, removeMember, deleteHousehold, inviteByEmail,
 } from './data'
 import {
   STATUSES, uid, num, money, containerValue, containerProfit,
@@ -35,8 +37,10 @@ export default function App() {
 function Main({ user }) {
   const [items, setItems] = useState([])
   const [resellerMode, setResellerMode] = useState(false)
+  const [households, setHouseholds] = useState([])
+  const [space, setSpace] = useState(null)        // null = personal; else household id
   const [loading, setLoading] = useState(true)
-  const [view, setView] = useState('list')      // list | form | detail | scan | settings
+  const [view, setView] = useState('list')
   const [editing, setEditing] = useState(null)
   const [query, setQuery] = useState('')
   const [sortBy, setSortBy] = useState('recent')
@@ -44,15 +48,40 @@ function Main({ user }) {
 
   function flash(t) { setToast(t); setTimeout(() => setToast(''), 1800) }
 
+  // Initial load: settings + households, then containers for the active space.
   useEffect(() => {
     (async () => {
       try {
-        const [list, s] = await Promise.all([fetchContainers(user.id), fetchSettings(user.id)])
-        setItems(list); setResellerMode(s.resellerMode)
+        const [s, hs] = await Promise.all([fetchSettings(user.id), fetchHouseholds(user.id)])
+        setResellerMode(s.resellerMode)
+        setHouseholds(hs)
+        const validSpace = s.activeHousehold && hs.some((h) => h.id === s.activeHousehold) ? s.activeHousehold : null
+        setSpace(validSpace)
+        const list = await fetchContainers(user.id, validSpace)
+        setItems(list)
       } catch (e) { flash('Could not load data') }
       finally { setLoading(false) }
     })()
   }, [user.id])
+
+  // Reload containers whenever the active space changes (after initial load).
+  const didInit = useRef(false)
+  useEffect(() => {
+    if (!didInit.current) { didInit.current = true; return }
+    (async () => {
+      setLoading(true)
+      try {
+        const list = await fetchContainers(user.id, space)
+        setItems(list)
+        await saveSettings(user.id, { activeHousehold: space })
+      } catch (e) { flash('Could not switch space') }
+      finally { setLoading(false) }
+    })()
+  }, [space])
+
+  async function reloadHouseholds() {
+    try { setHouseholds(await fetchHouseholds(user.id)) } catch (e) {}
+  }
 
   function openDetail(id) { setEditing(items.find((i) => i.id === id)); setView('detail') }
   function goList() { setView('list'); setEditing(null) }
@@ -64,12 +93,12 @@ function Main({ user }) {
   async function toggleReseller() {
     const next = !resellerMode
     setResellerMode(next)
-    try { await saveSettings(user.id, next) } catch (e) { flash('Could not save setting') }
+    try { await saveSettings(user.id, { resellerMode: next }) } catch (e) { flash('Could not save setting') }
   }
 
   async function saveItem(item) {
     try {
-      await upsertContainer(user.id, item)
+      await upsertContainer(user.id, item, space)
       setItems((prev) => {
         const idx = prev.findIndex((i) => i.id === item.id)
         if (idx >= 0) { const c = [...prev]; c[idx] = item; return c }
@@ -82,7 +111,7 @@ function Main({ user }) {
   async function quickAddItem(container, newItem) {
     const updated = { ...container, contents: [...(container.contents || []), newItem] }
     try {
-      await upsertContainer(user.id, updated)
+      await upsertContainer(user.id, updated, space)
       setItems((prev) => {
         const idx = prev.findIndex((i) => i.id === updated.id)
         if (idx >= 0) { const c = [...prev]; c[idx] = updated; return c }
@@ -108,7 +137,7 @@ function Main({ user }) {
     }
     const updated = { ...container, contents, history }
     try {
-      await upsertContainer(user.id, updated)
+      await upsertContainer(user.id, updated, space)
       setItems((prev) => {
         const idx = prev.findIndex((i) => i.id === updated.id)
         if (idx >= 0) { const c = [...prev]; c[idx] = updated; return c }
@@ -123,7 +152,7 @@ function Main({ user }) {
   async function batchCreate(count) {
     const ids = Array.from({ length: count }, () => uid())
     try {
-      await createBlankContainers(user.id, ids)
+      await createBlankContainers(user.id, ids, space)
       const now = Date.now()
       const blanks = ids.map((id, i) => ({
         id, name: 'Untitled', location: '', category: '', description: '',
@@ -133,6 +162,18 @@ function Main({ user }) {
       flash(`Created ${count} container${count > 1 ? 's' : ''}`)
       return ids
     } catch (e) { flash('Could not create containers'); return null }
+  }
+
+  async function moveItem(item, targetSpace) {
+    if ((targetSpace || null) === (space || null)) return
+    try {
+      await moveContainer(item.id, targetSpace)
+      // It's leaving the space we're currently viewing, so drop it from the list.
+      setItems((prev) => prev.filter((i) => i.id !== item.id))
+      goList()
+      const dest = targetSpace ? (households.find((h) => h.id === targetSpace)?.name || 'household') : 'Personal'
+      flash(`Moved to ${dest}`)
+    } catch (e) { flash('Could not move') }
   }
 
   async function removeItem(item) {
@@ -150,14 +191,15 @@ function Main({ user }) {
   const common = { items, resellerMode, user, flash }
   return (
     <div className="app">
-      {view === 'list' && <ListView {...common} {...{ query, setQuery, sortBy, setSortBy, openDetail, newItem, setView, signOut: () => supabase.auth.signOut() }} />}
+      {view === 'list' && <ListView {...common} {...{ query, setQuery, sortBy, setSortBy, openDetail, newItem, setView, households, space, setSpace, signOut: () => supabase.auth.signOut() }} />}
       {view === 'form' && <FormView {...common} editing={editing} setEditing={setEditing} onSave={saveItem} onBack={() => (items.find((i) => i.id === editing.id) ? setView('detail') : goList())} />}
-      {view === 'detail' && <DetailView {...common} item={editing} onEdit={() => setView('form')} onDelete={() => removeItem(editing)} onBack={goList} onQuickAdd={() => setView('quickadd')} onPull={pullItem} />}
+      {view === 'detail' && <DetailView {...common} item={editing} onEdit={() => setView('form')} onDelete={() => removeItem(editing)} onBack={goList} onQuickAdd={() => setView('quickadd')} onPull={pullItem} onMove={moveItem} households={households} space={space} />}
       {view === 'scan' && <ScanView items={items} resellerMode={resellerMode} onFound={openDetail} onBack={goList} flash={flash} onQuickAdd={quickAddItem} />}
       {view === 'quickadd' && <QuickAddView container={editing} resellerMode={resellerMode} onAdd={quickAddItem} onDone={() => setView('detail')} onBack={() => setView('detail')} />}
       {view === 'batch' && <BatchView onCreate={batchCreate} onBack={goList} />}
       {view === 'expiring' && <ExpiringView items={items} resellerMode={resellerMode} onOpen={openDetail} onPull={pullItem} onBack={goList} />}
       {view === 'sales' && <SalesView items={items} onBack={goList} />}
+      {view === 'households' && <HouseholdsView user={user} households={households} space={space} setSpace={setSpace} reload={reloadHouseholds} onBack={goList} flash={flash} />}
       {view === 'settings' && <SettingsView resellerMode={resellerMode} toggleReseller={toggleReseller} onBack={goList} signOut={() => supabase.auth.signOut()} email={user.email} />}
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -165,7 +207,7 @@ function Main({ user }) {
 }
 
 /* ---------------- List ---------------- */
-function ListView({ items, resellerMode, query, setQuery, sortBy, setSortBy, openDetail, newItem, setView }) {
+function ListView({ items, resellerMode, query, setQuery, sortBy, setSortBy, openDetail, newItem, setView, households, space, setSpace }) {
   const q = query.trim().toLowerCase()
   let results = items.map((it) => ({ it, hit: null }))
   if (q) {
@@ -187,12 +229,21 @@ function ListView({ items, resellerMode, query, setQuery, sortBy, setSortBy, ope
     ? items.reduce((s, it) => s + containerProfit(it), 0)
     : items.reduce((s, it) => s + containerValue(it), 0)
   const expiringCount = collectExpiring(items, 30).length
+  const activeName = space ? (households.find((h) => h.id === space)?.name || 'Household') : 'Personal'
 
   return (
     <>
       <div className="topbar">
-        <h1>My containers</h1>
+        <h1>{activeName}</h1>
         <button className="iconbtn" aria-label="Settings" onClick={() => setView('settings')}>⚙</button>
+      </div>
+
+      <div className="row" style={{ marginBottom: 14, alignItems: 'center' }}>
+        <select value={space || ''} onChange={(e) => setSpace(e.target.value || null)} aria-label="Switch space">
+          <option value="">🔒 Personal</option>
+          {households.map((h) => <option key={h.id} value={h.id}>🏠 {h.name}</option>)}
+        </select>
+        <button className="iconbtn" title="Manage households" aria-label="Manage households" onClick={() => setView('households')}>👥</button>
       </div>
 
       {items.length > 0 && (
@@ -379,9 +430,10 @@ function FormView({ editing, setEditing, onSave, onBack, resellerMode, user, fla
 }
 
 /* ---------------- Detail ---------------- */
-function DetailView({ item, resellerMode, onEdit, onDelete, onBack, onQuickAdd, onPull }) {
+function DetailView({ item, resellerMode, onEdit, onDelete, onBack, onQuickAdd, onPull, onMove, households, space }) {
   const [qr, setQr] = useState('')
   const [pullIdx, setPullIdx] = useState(null)   // index of item being pulled (shows action sheet)
+  const [showMove, setShowMove] = useState(false)
   const [sellIdx, setSellIdx] = useState(null)   // index in sell-price entry mode
   const [sellPrice, setSellPrice] = useState('')
   const [sellCost, setSellCost] = useState('')
@@ -424,7 +476,27 @@ function DetailView({ item, resellerMode, onEdit, onDelete, onBack, onQuickAdd, 
         <button className="btn" onClick={() => printLabel(item)}>🖨 Print label</button>
         <button className="btn" onClick={onEdit}>✎ Edit</button>
       </div>
-      <button className="btn primary" onClick={onQuickAdd} style={{ marginBottom: 16 }}>＋ Add item to this container</button>
+      <button className="btn primary" onClick={onQuickAdd} style={{ marginBottom: 12 }}>＋ Add item to this container</button>
+      {(households.length > 0 || space) && (
+        <>
+          <button className="btn" onClick={() => setShowMove(!showMove)} style={{ marginBottom: showMove ? 10 : 16, justifyContent: 'space-between' }}>
+            <span>↪ Move to another space</span>
+            <span className="muted">{showMove ? '▲' : '▼'}</span>
+          </button>
+          {showMove && (
+            <div className="card" style={{ marginBottom: 16, padding: 12 }}>
+              <p className="muted" style={{ fontSize: 13, margin: '0 0 10px' }}>Move “{item.name}” to:</p>
+              {space && (
+                <button className="btn" style={{ marginBottom: 8 }} onClick={() => { onMove(item, null); setShowMove(false) }}>🔒 Personal</button>
+              )}
+              {households.filter((h) => h.id !== space).map((h) => (
+                <button key={h.id} className="btn" style={{ marginBottom: 8 }} onClick={() => { onMove(item, h.id); setShowMove(false) }}>🏠 {h.name}</button>
+              ))}
+              <button className="btn ghost" onClick={() => setShowMove(false)}>Cancel</button>
+            </div>
+          )}
+        </>
+      )}
 
       <h2 style={{ fontSize: 18, marginBottom: 8 }}>{item.name}</h2>
       {item.location && <div className="badge brand" style={{ marginBottom: 12 }}>📍 {item.location}</div>}
@@ -939,6 +1011,143 @@ function BatchView({ onCreate, onBack }) {
           <button className="btn" onClick={onBack}>Done</button>
         </div>
       )}
+    </>
+  )
+}
+
+/* ---------------- Households ---------------- */
+function HouseholdsView({ user, households, space, setSpace, reload, onBack, flash }) {
+  const [name, setName] = useState('')
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [manage, setManage] = useState(null)   // household being managed
+  const [members, setMembers] = useState([])
+  const [inviteEmail, setInviteEmail] = useState('')
+
+  async function create() {
+    if (!name.trim()) return
+    setBusy(true)
+    try { const h = await createHousehold(user.id, name.trim()); await reload(); setName(''); setSpace(h.id); flash('Household created') }
+    catch (e) { flash('Could not create') } finally { setBusy(false) }
+  }
+  async function join() {
+    if (!code.trim()) return
+    setBusy(true)
+    try {
+      const hid = await joinHouseholdByCode(code.trim().toUpperCase())
+      if (!hid) { flash('No household with that code'); setBusy(false); return }
+      await reload(); setCode(''); setSpace(hid); flash('Joined household')
+    } catch (e) { flash('Could not join') } finally { setBusy(false) }
+  }
+  async function openManage(h) {
+    setManage(h)
+    try { setMembers(await fetchMembers(h.id)) } catch (e) { setMembers([]) }
+  }
+  async function invite() {
+    if (!inviteEmail.trim()) return
+    try { await inviteByEmail(manage.id, user.id, inviteEmail); setInviteEmail(''); flash('Invite noted — also share the join code') }
+    catch (e) { flash('Could not invite') }
+  }
+  async function kick(uid2) {
+    try { await removeMember(manage.id, uid2); setMembers(await fetchMembers(manage.id)); flash('Member removed') }
+    catch (e) { flash('Could not remove') }
+  }
+  async function leave(h) {
+    if (!confirm(`Leave “${h.name}”?`)) return
+    try { await leaveHousehold(user.id, h.id); if (space === h.id) setSpace(null); await reload(); setManage(null); flash('Left household') }
+    catch (e) { flash('Could not leave') }
+  }
+  async function destroy(h) {
+    if (!confirm(`Delete “${h.name}” for everyone? This cannot be undone.`)) return
+    try { await deleteHousehold(h.id); if (space === h.id) setSpace(null); await reload(); setManage(null); flash('Household deleted') }
+    catch (e) { flash('Could not delete') }
+  }
+
+  if (manage) {
+    const isOwner = manage.role === 'owner'
+    return (
+      <>
+        <div className="topbar">
+          <button className="iconbtn" aria-label="Back" onClick={() => setManage(null)}>‹</button>
+          <h1 style={{ fontSize: 18 }}>{manage.name}</h1>
+        </div>
+
+        <div className="card" style={{ marginBottom: 14 }}>
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>Join code — share this so others can join</p>
+          <p style={{ fontFamily: 'monospace', fontSize: 26, fontWeight: 600, letterSpacing: 2, margin: '6px 0 0' }}>{manage.joinCode}</p>
+        </div>
+
+        <label className="field">Invite by email (optional)</label>
+        <div className="row" style={{ marginBottom: 18 }}>
+          <input type="email" value={inviteEmail} autoCapitalize="none" onChange={(e) => setInviteEmail(e.target.value)} placeholder="name@example.com" />
+          <button className="btn" style={{ width: 'auto' }} onClick={invite}>Invite</button>
+        </div>
+        <p className="muted" style={{ fontSize: 12, marginTop: -8, marginBottom: 18, lineHeight: 1.5 }}>
+          Email invites are recorded, but the reliable way in is the join code above — send it by text or however you like, and they enter it to join.
+        </p>
+
+        <p className="muted" style={{ fontWeight: 500, fontSize: 13, margin: '0 0 8px' }}>Members ({members.length})</p>
+        {members.map((m) => (
+          <div key={m.user_id} className="listcard" style={{ padding: '11px 14px' }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p className="ellip" style={{ margin: 0, fontSize: 14 }}>{m.email || m.user_id.slice(0, 8)}</p>
+              <p className="muted" style={{ fontSize: 12, margin: '2px 0 0' }}>{m.role}{m.user_id === user.id ? ' · you' : ''}</p>
+            </div>
+            {isOwner && m.user_id !== user.id && <button className="btn ghost" style={{ width: 'auto', color: 'var(--danger)' }} onClick={() => kick(m.user_id)}>Remove</button>}
+          </div>
+        ))}
+
+        <div style={{ marginTop: 18 }}>
+          {!isOwner && <button className="btn danger" onClick={() => leave(manage)}>Leave household</button>}
+          {isOwner && <button className="btn danger" onClick={() => destroy(manage)}>Delete household</button>}
+        </div>
+      </>
+    )
+  }
+
+  return (
+    <>
+      <div className="topbar">
+        <button className="iconbtn" aria-label="Back" onClick={onBack}>‹</button>
+        <h1 style={{ fontSize: 18 }}>Households</h1>
+      </div>
+
+      <p className="muted" style={{ fontSize: 14, marginTop: 0, lineHeight: 1.6 }}>
+        A household is a shared space — everyone in it sees and edits the same containers.
+        Your personal inventory always stays private and separate.
+      </p>
+
+      {households.length > 0 && (
+        <>
+          <p className="muted" style={{ fontWeight: 500, fontSize: 13, margin: '14px 0 8px' }}>Your households</p>
+          {households.map((h) => (
+            <div key={h.id} className="listcard" onClick={() => openManage(h)} style={{ cursor: 'pointer' }}>
+              <div className="thumb placeholder">🏠</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p className="ellip" style={{ fontWeight: 500, margin: 0 }}>{h.name}</p>
+                <p className="muted" style={{ fontSize: 12, margin: '2px 0 0' }}>{h.role} · code {h.joinCode}</p>
+              </div>
+              <span className="muted">›</span>
+            </div>
+          ))}
+        </>
+      )}
+
+      <div className="card" style={{ margin: '18px 0 14px' }}>
+        <p style={{ fontWeight: 500, margin: '0 0 10px' }}>Create a household</p>
+        <div className="row">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. The Smith family" />
+          <button className="btn primary" style={{ width: 'auto' }} disabled={busy} onClick={create}>Create</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <p style={{ fontWeight: 500, margin: '0 0 10px' }}>Join with a code</p>
+        <div className="row">
+          <input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="ENTER CODE" style={{ textTransform: 'uppercase', letterSpacing: 1 }} />
+          <button className="btn" style={{ width: 'auto' }} disabled={busy} onClick={join}>Join</button>
+        </div>
+      </div>
     </>
   )
 }

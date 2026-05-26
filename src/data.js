@@ -1,20 +1,21 @@
 import { supabase } from './supabaseClient'
 
 // ---- Containers ----
-export async function fetchContainers(userId) {
-  const { data, error } = await supabase
-    .from('containers')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
+// space: null = personal (only my own, no household); otherwise a household id.
+export async function fetchContainers(userId, space) {
+  let q = supabase.from('containers').select('*').order('created_at', { ascending: false })
+  if (space) q = q.eq('household_id', space)
+  else q = q.is('household_id', null).eq('user_id', userId)
+  const { data, error } = await q
   if (error) throw error
   return (data || []).map(rowToItem)
 }
 
-export async function upsertContainer(userId, item) {
+export async function upsertContainer(userId, item, space) {
   const row = {
     id: item.id,
-    user_id: userId,
+    user_id: item.user_id || userId,
+    household_id: space || null,
     name: item.name || 'Untitled',
     location: item.location || '',
     category: item.category || '',
@@ -33,10 +34,20 @@ export async function deleteContainer(id) {
   if (error) throw error
 }
 
+// Move a container to a different space: targetSpace = null (Personal) or a household id.
+export async function moveContainer(id, targetSpace) {
+  const { error } = await supabase
+    .from('containers')
+    .update({ household_id: targetSpace || null })
+    .eq('id', id)
+  if (error) throw error
+}
+
 // Create N blank containers at once (for batch-printing blank QR labels).
-export async function createBlankContainers(userId, ids) {
+export async function createBlankContainers(userId, ids, space) {
   const rows = ids.map((id) => ({
-    id, user_id: userId, name: 'Untitled', location: '', category: '',
+    id, user_id: userId, household_id: space || null,
+    name: 'Untitled', location: '', category: '',
     description: '', expires: null, photos: [], contents: [], history: [],
   }))
   const { error } = await supabase.from('containers').insert(rows)
@@ -46,6 +57,8 @@ export async function createBlankContainers(userId, ids) {
 function rowToItem(r) {
   return {
     id: r.id,
+    user_id: r.user_id,
+    household_id: r.household_id || null,
     name: r.name,
     location: r.location || '',
     category: r.category || '',
@@ -61,15 +74,86 @@ function rowToItem(r) {
 // ---- Settings ----
 export async function fetchSettings(userId) {
   const { data, error } = await supabase
-    .from('settings').select('reseller_mode').eq('user_id', userId).maybeSingle()
+    .from('settings').select('reseller_mode, active_household').eq('user_id', userId).maybeSingle()
   if (error) throw error
-  return { resellerMode: data ? !!data.reseller_mode : false }
+  return {
+    resellerMode: data ? !!data.reseller_mode : false,
+    activeHousehold: data ? (data.active_household || null) : null,
+  }
 }
 
-export async function saveSettings(userId, resellerMode) {
+export async function saveSettings(userId, { resellerMode, activeHousehold }) {
+  const patch = { user_id: userId, updated_at: new Date().toISOString() }
+  if (resellerMode !== undefined) patch.reseller_mode = resellerMode
+  if (activeHousehold !== undefined) patch.active_household = activeHousehold
+  const { error } = await supabase.from('settings').upsert(patch)
+  if (error) throw error
+}
+
+// ---- Households ----
+function makeCode() {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+  let s = ''
+  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)]
+  return s
+}
+
+export async function fetchHouseholds(userId) {
+  // households I'm a member of
+  const { data: mem, error: e1 } = await supabase
+    .from('household_members').select('household_id, role').eq('user_id', userId)
+  if (e1) throw e1
+  if (!mem || !mem.length) return []
+  const ids = mem.map((m) => m.household_id)
+  const { data: hs, error: e2 } = await supabase
+    .from('households').select('*').in('id', ids)
+  if (e2) throw e2
+  const roleById = Object.fromEntries(mem.map((m) => [m.household_id, m.role]))
+  return (hs || []).map((h) => ({ id: h.id, name: h.name, joinCode: h.join_code, ownerId: h.owner_id, role: roleById[h.id] || 'member' }))
+}
+
+export async function createHousehold(userId, name) {
+  const { data, error } = await supabase
+    .from('households')
+    .insert({ name: name || 'My household', owner_id: userId, join_code: makeCode() })
+    .select().single()
+  if (error) throw error
+  return { id: data.id, name: data.name, joinCode: data.join_code, ownerId: data.owner_id, role: 'owner' }
+}
+
+export async function joinHouseholdByCode(code) {
+  const { data, error } = await supabase.rpc('join_household_by_code', { code })
+  if (error) throw error
+  return data || null   // household id or null
+}
+
+export async function fetchMembers(householdId) {
+  const { data, error } = await supabase
+    .from('household_members').select('user_id, email, role').eq('household_id', householdId)
+  if (error) throw error
+  return data || []
+}
+
+export async function leaveHousehold(userId, householdId) {
   const { error } = await supabase
-    .from('settings')
-    .upsert({ user_id: userId, reseller_mode: resellerMode, updated_at: new Date().toISOString() })
+    .from('household_members').delete().eq('household_id', householdId).eq('user_id', userId)
+  if (error) throw error
+}
+
+export async function removeMember(householdId, userId) {
+  const { error } = await supabase
+    .from('household_members').delete().eq('household_id', householdId).eq('user_id', userId)
+  if (error) throw error
+}
+
+export async function deleteHousehold(householdId) {
+  const { error } = await supabase.from('households').delete().eq('id', householdId)
+  if (error) throw error
+}
+
+export async function inviteByEmail(householdId, userId, email) {
+  const { error } = await supabase
+    .from('household_invites').insert({ household_id: householdId, email: email.trim().toLowerCase(), invited_by: userId })
   if (error) throw error
 }
 
