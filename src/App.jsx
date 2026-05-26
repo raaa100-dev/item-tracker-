@@ -8,7 +8,7 @@ import {
 } from './data'
 import {
   STATUSES, uid, num, money, containerValue, containerProfit,
-  statusClass, shrinkImage, exportCSV, shortCode, expStatus, expLabel, soonestExp, collectExpiring,
+  statusClass, shrinkImage, exportCSV, shortCode, expStatus, expLabel, soonestExp, collectExpiring, salesSummary, exportSalesCSV,
 } from './utils'
 import { qrDataUrl, printLabel, printAll, printBlanks } from './print'
 import { Html5Qrcode } from 'html5-qrcode'
@@ -157,6 +157,7 @@ function Main({ user }) {
       {view === 'quickadd' && <QuickAddView container={editing} resellerMode={resellerMode} onAdd={quickAddItem} onDone={() => setView('detail')} onBack={() => setView('detail')} />}
       {view === 'batch' && <BatchView onCreate={batchCreate} onBack={goList} />}
       {view === 'expiring' && <ExpiringView items={items} resellerMode={resellerMode} onOpen={openDetail} onPull={pullItem} onBack={goList} />}
+      {view === 'sales' && <SalesView items={items} onBack={goList} />}
       {view === 'settings' && <SettingsView resellerMode={resellerMode} toggleReseller={toggleReseller} onBack={goList} signOut={() => supabase.auth.signOut()} email={user.email} />}
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -217,6 +218,11 @@ function ListView({ items, resellerMode, query, setQuery, sortBy, setSortBy, ope
       <button className="btn ghost" onClick={() => setView('batch')} style={{ marginBottom: 14 }}>
         ⧉ Print blank labels (set up bins later)
       </button>
+      {resellerMode && (
+        <button className="btn" onClick={() => setView('sales')} style={{ marginBottom: 14, display: 'flex', justifyContent: 'center', gap: 7 }}>
+          📊 Sales summary
+        </button>
+      )}
 
       {items.length > 0 && (
         <>
@@ -348,7 +354,7 @@ function FormView({ editing, setEditing, onSave, onBack, resellerMode, user, fla
           {resellerMode ? (
             <>
               <div className="row" style={{ marginBottom: 8 }}>
-                <input type="number" step="0.01" value={c.cost ?? ''} onChange={(e) => setContent(i, 'cost', e.target.value)} placeholder="Cost $" />
+                <input type="number" step="0.01" value={c.cost ?? ''} onChange={(e) => setContent(i, 'cost', e.target.value)} placeholder="Cost / paid $" />
                 <input type="number" step="0.01" value={c.sale ?? ''} onChange={(e) => setContent(i, 'sale', e.target.value)} placeholder="Sale $" />
               </div>
               <div className="row" style={{ marginBottom: 8 }}>
@@ -378,17 +384,29 @@ function DetailView({ item, resellerMode, onEdit, onDelete, onBack, onQuickAdd, 
   const [pullIdx, setPullIdx] = useState(null)   // index of item being pulled (shows action sheet)
   const [sellIdx, setSellIdx] = useState(null)   // index in sell-price entry mode
   const [sellPrice, setSellPrice] = useState('')
+  const [sellCost, setSellCost] = useState('')
+  const [fees, setFees] = useState({ sellerFee: '', ccFee: '', shipping: '', packing: '' })
+  const [showFees, setShowFees] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   useEffect(() => { qrDataUrl(item.id).then(setQr) }, [item.id])
   const cv = containerValue(item)
   const profit = containerProfit(item)
   const cExp = expStatus(item.expires)
 
+  function resetSell() {
+    setSellIdx(null); setSellPrice(''); setSellCost(''); setPullIdx(null)
+    setFees({ sellerFee: '', ccFee: '', shipping: '', packing: '' }); setShowFees(false)
+  }
   function confirmSell(i, c) {
     const sale = sellPrice === '' ? c.sale : sellPrice
-    onPull(item, i, 'sold', { sale })
-    setSellIdx(null); setSellPrice(''); setPullIdx(null)
+    const cost = sellCost === '' ? c.cost : sellCost
+    onPull(item, i, 'sold', {
+      sale, cost,
+      sellerFee: fees.sellerFee, ccFee: fees.ccFee, shipping: fees.shipping, packing: fees.packing,
+    })
+    resetSell()
   }
+  const feeTotal = num(fees.sellerFee) + num(fees.ccFee) + num(fees.shipping) + num(fees.packing)
 
   return (
     <>
@@ -460,13 +478,47 @@ function DetailView({ item, resellerMode, onEdit, onDelete, onBack, onQuickAdd, 
               <div className="card" style={{ marginTop: 8, padding: 12 }}>
                 {sellIdx === i ? (
                   <>
-                    <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>Sold “{c.name}” for how much?</p>
+                    <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>Record sale of “{c.name}”</p>
+                    <label className="field">Sold for $</label>
                     <input type="number" step="0.01" autoFocus value={sellPrice}
-                      onChange={(e) => setSellPrice(e.target.value)} placeholder={c.sale ? `${c.sale}` : 'Sale price $'}
-                      style={{ marginBottom: 10 }} onKeyDown={(e) => e.key === 'Enter' && confirmSell(i, c)} />
+                      onChange={(e) => setSellPrice(e.target.value)} placeholder={c.sale ? `${c.sale}` : 'Sale price'}
+                      style={{ marginBottom: 10 }} />
+                    <label className="field">What you paid $ (cost)</label>
+                    <input type="number" step="0.01" value={sellCost}
+                      onChange={(e) => setSellCost(e.target.value)} placeholder={c.cost ? `${c.cost}` : 'Cost'}
+                      style={{ marginBottom: 10 }} />
+
+                    <button className="btn ghost" onClick={() => setShowFees(!showFees)}
+                      style={{ justifyContent: 'space-between', marginBottom: showFees ? 10 : 10 }}>
+                      <span>Selling fees{feeTotal > 0 ? ` (${money(feeTotal)})` : ' (optional)'}</span>
+                      <span className="muted">{showFees ? '▲' : '▼'}</span>
+                    </button>
+                    {showFees && (
+                      <div style={{ marginBottom: 10 }}>
+                        <div className="row" style={{ marginBottom: 8 }}>
+                          <div style={{ flex: 1 }}><label className="field">Seller / marketplace fee $</label>
+                            <input type="number" step="0.01" value={fees.sellerFee} onChange={(e) => setFees({ ...fees, sellerFee: e.target.value })} /></div>
+                          <div style={{ flex: 1 }}><label className="field">Card processing fee $</label>
+                            <input type="number" step="0.01" value={fees.ccFee} onChange={(e) => setFees({ ...fees, ccFee: e.target.value })} /></div>
+                        </div>
+                        <div className="row">
+                          <div style={{ flex: 1 }}><label className="field">Shipping $</label>
+                            <input type="number" step="0.01" value={fees.shipping} onChange={(e) => setFees({ ...fees, shipping: e.target.value })} /></div>
+                          <div style={{ flex: 1 }}><label className="field">Packing materials $</label>
+                            <input type="number" step="0.01" value={fees.packing} onChange={(e) => setFees({ ...fees, packing: e.target.value })} /></div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="stat" style={{ marginBottom: 10 }}>
+                      <p className="label">Net profit (sale − cost − fees)</p>
+                      <p className="value" style={{ fontSize: 20, color: (num(sellPrice || c.sale) - num(sellCost || c.cost) - feeTotal) >= 0 ? 'var(--ok-text)' : 'var(--danger)' }}>
+                        {money(num(sellPrice || c.sale) - num(sellCost || c.cost) - feeTotal)}
+                      </p>
+                    </div>
                     <div className="row">
                       <button className="btn primary" onClick={() => confirmSell(i, c)}>Confirm sale</button>
-                      <button className="btn ghost" onClick={() => { setSellIdx(null); setSellPrice('') }}>Cancel</button>
+                      <button className="btn ghost" onClick={resetSell}>Cancel</button>
                     </div>
                   </>
                 ) : (
@@ -474,7 +526,7 @@ function DetailView({ item, resellerMode, onEdit, onDelete, onBack, onQuickAdd, 
                     <p className="muted" style={{ fontSize: 13, margin: '0 0 10px' }}>Pull “{c.name}” out — what happened to it?</p>
                     <div className="row" style={{ marginBottom: 8 }}>
                       <button className="btn" onClick={() => { onPull(item, i, 'used'); setPullIdx(null) }}>Used</button>
-                      <button className="btn" onClick={() => { setSellIdx(i); setSellPrice(c.sale ?? '') }}>Sold</button>
+                      <button className="btn" onClick={() => { setSellIdx(i); setSellPrice(c.sale ?? ''); setSellCost(c.cost ?? '') }}>Sold</button>
                     </div>
                     <div className="row">
                       <button className="btn danger" onClick={() => { onPull(item, i, 'remove'); setPullIdx(null) }}>Remove</button>
@@ -663,11 +715,11 @@ function QuickAddView({ container, resellerMode, onAdd, onBack, onDone, afterAdd
         <>
           <div className="row" style={{ marginBottom: 14 }}>
             <div style={{ flex: 1 }}>
-              <label className="field">Cost $</label>
-              <input type="number" step="0.01" value={c.cost ?? ''} onChange={(e) => set('cost', e.target.value)} />
+              <label className="field">Cost / paid $</label>
+              <input type="number" step="0.01" value={c.cost ?? ''} onChange={(e) => set('cost', e.target.value)} placeholder="What you paid" />
             </div>
             <div style={{ flex: 1 }}>
-              <label className="field">Sale $</label>
+              <label className="field">Sale $ (if listed)</label>
               <input type="number" step="0.01" value={c.sale ?? ''} onChange={(e) => set('sale', e.target.value)} />
             </div>
           </div>
@@ -759,6 +811,83 @@ function ExpiringView({ items, resellerMode, onOpen, onPull, onBack }) {
 
       <Section title="Expired" rows={expired} tone="var(--danger)" />
       <Section title="Expiring soon" rows={soon} tone="var(--warn-text)" />
+    </>
+  )
+}
+
+/* ---------------- Sales summary (reseller) ---------------- */
+function SalesView({ items, onBack }) {
+  const [windowDays, setWindowDays] = useState(30)
+  const opts = [{ d: 7, l: '7 days' }, { d: 30, l: '30 days' }, { d: 90, l: '90 days' }, { d: 365, l: '1 year' }, { d: null, l: 'All time' }]
+  const { sales, totals } = salesSummary(items, windowDays)
+
+  // group revenue by marketplace
+  const byMarket = {}
+  for (const s of sales) {
+    const k = s.marketplace || 'Unspecified'
+    byMarket[k] = (byMarket[k] || 0) + s.revenue
+  }
+  const markets = Object.entries(byMarket).sort((a, b) => b[1] - a[1])
+
+  return (
+    <>
+      <div className="topbar">
+        <button className="iconbtn" aria-label="Back" onClick={onBack}>‹</button>
+        <h1 style={{ fontSize: 18 }}>Sales summary</h1>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+        {opts.map((o) => (
+          <button key={o.l} className={`btn ${windowDays === o.d ? 'primary' : ''}`}
+            style={{ width: 'auto', padding: '7px 14px' }} onClick={() => setWindowDays(o.d)}>{o.l}</button>
+        ))}
+      </div>
+
+      <div className="row" style={{ marginBottom: 12 }}>
+        <div className="stat"><p className="label">Revenue</p><p className="value" style={{ fontSize: 22 }}>{money(totals.revenue) || '$0.00'}</p></div>
+        <div className="stat"><p className="label">Item cost</p><p className="value" style={{ fontSize: 22 }}>{money(totals.cost) || '$0.00'}</p></div>
+      </div>
+      <div className="row" style={{ marginBottom: 12 }}>
+        <div className="stat"><p className="label">Selling fees</p><p className="value" style={{ fontSize: 22 }}>{money(totals.fees) || '$0.00'}</p></div>
+        <div className="stat"><p className="label">Items sold</p><p className="value" style={{ fontSize: 22 }}>{totals.count}</p></div>
+      </div>
+      <div className="stat" style={{ marginBottom: 16 }}>
+        <p className="label">Net profit (revenue − cost − fees)</p>
+        <p className="value" style={{ fontSize: 26, color: totals.profit >= 0 ? 'var(--ok-text)' : 'var(--danger)' }}>{money(totals.profit) || '$0.00'}</p>
+      </div>
+
+      <button className="btn" onClick={() => exportSalesCSV(items)} style={{ marginBottom: 18, justifyContent: 'center', gap: 7 }}>
+        ⤓ Download sales CSV (all sales)
+      </button>
+
+      {markets.length > 0 && (
+        <>
+          <p className="muted" style={{ fontWeight: 500, fontSize: 13, margin: '0 0 8px' }}>Revenue by marketplace</p>
+          <div className="card" style={{ marginBottom: 18, padding: '8px 14px' }}>
+            {markets.map(([m, v], i) => (
+              <div key={m} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: i < markets.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                <span style={{ fontSize: 14 }}>{m}</span>
+                <span style={{ fontSize: 14, fontWeight: 500 }}>{money(v)}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <p className="muted" style={{ fontWeight: 500, fontSize: 13, margin: '0 0 8px' }}>Sold items ({sales.length})</p>
+      {!sales.length && <p className="muted" style={{ fontSize: 14 }}>No sales recorded in this period. Mark an item “Sold” when you pull it to log it here.</p>}
+      {sales.map((s, i) => (
+        <div key={i} className="card" style={{ marginBottom: 10, padding: '12px 14px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ flex: 1, fontSize: 15 }}>{s.name}{s.qty > 1 ? ` ×${s.qty}` : ''}</span>
+            <span style={{ fontSize: 15, fontWeight: 500, color: s.profit >= 0 ? 'var(--ok-text)' : 'var(--danger)' }}>{s.profit >= 0 ? '+' : ''}{money(s.profit)}</span>
+          </div>
+          <p className="muted" style={{ fontSize: 13, margin: '5px 0 0' }}>
+            {money(s.revenue)} revenue{s.cost ? ` · ${money(s.cost)} cost` : ''}{s.fees ? ` · ${money(s.fees)} fees` : ''}{s.marketplace ? ` · ${s.marketplace}` : ''}
+            {s.soldAt ? ` · ${new Date(s.soldAt).toLocaleDateString()}` : ''}
+          </p>
+        </div>
+      ))}
     </>
   )
 }

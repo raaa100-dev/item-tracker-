@@ -83,6 +83,10 @@ export function containerValue(it) {
   return (it.contents || []).reduce((s, c) => s + num(c.value) * (num(c.qty) || 1), 0)
 }
 
+export function feeSum(h) {
+  return num(h.sellerFee) + num(h.ccFee) + num(h.shipping) + num(h.packing)
+}
+
 export function containerProfit(it) {
   let p = 0
   for (const c of it.contents || []) {
@@ -91,13 +95,68 @@ export function containerProfit(it) {
   }
   for (const h of it.history || []) {
     if (h.reason === 'sold')
-      p += (num(h.sale) - num(h.cost)) * (num(h.qty) || 1)
+      p += (num(h.sale) - num(h.cost)) * (num(h.qty) || 1) - feeSum(h)
   }
   return p
 }
 
 export function statusClass(s) {
   return ({ 'In stock': 'stock', Listed: 'listed', Sold: 'sold', Shipped: 'shipped' }[s] || 'stock')
+}
+
+// Collect all sold items from every container's history, with computed profit.
+// Returns { sales: [...], totals: {revenue, cost, profit, count} } for a time window.
+// windowDays: null = all time.
+export function salesSummary(items, windowDays = null) {
+  const cutoff = windowDays ? Date.now() - windowDays * 86400000 : 0
+  const sales = []
+  for (const it of items) {
+    for (const h of it.history || []) {
+      if (h.reason !== 'sold') continue
+      if (cutoff && (h.pulledAt || 0) < cutoff) continue
+      const qty = num(h.qty) || 1
+      const revenue = num(h.sale) * qty
+      const cost = num(h.cost) * qty
+      const fees = feeSum(h)
+      sales.push({
+        name: h.name, qty, revenue, cost, fees,
+        sellerFee: num(h.sellerFee), ccFee: num(h.ccFee), shipping: num(h.shipping), packing: num(h.packing),
+        profit: revenue - cost - fees,
+        marketplace: h.marketplace || '', sku: h.sku || '', soldAt: h.pulledAt || 0,
+        containerName: it.name,
+      })
+    }
+  }
+  sales.sort((a, b) => b.soldAt - a.soldAt)
+  const totals = sales.reduce((t, s) => ({
+    revenue: t.revenue + s.revenue, cost: t.cost + s.cost, fees: t.fees + s.fees,
+    profit: t.profit + s.profit, count: t.count + s.qty,
+  }), { revenue: 0, cost: 0, fees: 0, profit: 0, count: 0 })
+  return { sales, totals }
+}
+
+export function exportSalesCSV(items, windowLabel) {
+  const { sales, totals } = salesSummary(items, null)
+  const headers = ['Date', 'Item', 'Container', 'Qty', 'Marketplace', 'SKU',
+    'Revenue', 'Cost', 'Seller fee', 'Card fee', 'Shipping', 'Packing', 'Total fees', 'Net profit']
+  const rows = [headers]
+  for (const s of sales) {
+    rows.push([
+      s.soldAt ? new Date(s.soldAt).toLocaleDateString() : '', s.name, s.containerName, s.qty,
+      s.marketplace, s.sku, s.revenue.toFixed(2), s.cost.toFixed(2),
+      s.sellerFee.toFixed(2), s.ccFee.toFixed(2), s.shipping.toFixed(2), s.packing.toFixed(2),
+      s.fees.toFixed(2), s.profit.toFixed(2),
+    ])
+  }
+  rows.push([])
+  rows.push(['TOTALS', '', '', totals.count, '', '', totals.revenue.toFixed(2), totals.cost.toFixed(2),
+    '', '', '', '', totals.fees.toFixed(2), totals.profit.toFixed(2)])
+  const csv = rows.map((r) => r.map((f) => `"${String(f).replace(/"/g, '""')}"`).join(',')).join('\n')
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = 'binventory-sales.csv'; a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 // Resize + compress an image File to a JPEG data URL, capped at maxPx on the long edge.
