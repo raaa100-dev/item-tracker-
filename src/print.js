@@ -1,4 +1,5 @@
 import QRCode from 'qrcode'
+import { shortCode } from './utils'
 
 export async function qrDataUrl(text, size = 220) {
   return QRCode.toDataURL(text, { width: size, margin: 1, errorCorrectionLevel: 'M' })
@@ -20,6 +21,24 @@ export async function printLabel(item) {
     <img src="${qr}"/><h1>${esc(item.name)}</h1><p>${esc(item.category) || ''}</p>
     ${item.location ? `<p class="loc">${esc(item.location)}</p>` : ''}
   </div><script>setTimeout(()=>window.print(),350)<\/script></body></html>`)
+  w.document.close()
+}
+
+export async function printBlanks(ids) {
+  if (!ids.length) return
+  const cards = await Promise.all(ids.map(async (id) => {
+    const qr = await qrDataUrl(id, 180)
+    return `<div class="label"><img src="${qr}"/>
+      <div class="code">${shortCode(id)}</div></div>`
+  }))
+  const w = window.open('', '_blank')
+  if (!w) { alert('Please allow pop-ups to print.'); return }
+  w.document.write(`<html><head><title>Blank labels</title><style>
+    body{font-family:sans-serif;padding:16px;display:flex;flex-wrap:wrap;gap:14px;}
+    .label{border:1.5px solid #000;border-radius:8px;padding:12px;width:170px;text-align:center;page-break-inside:avoid;}
+    .code{font-size:18px;font-weight:bold;margin-top:8px;letter-spacing:1px;font-family:monospace;}
+    img{width:150px;height:150px;}
+  </style></head><body>${cards.join('')}<script>setTimeout(()=>window.print(),450)<\/script></body></html>`)
   w.document.close()
 }
 

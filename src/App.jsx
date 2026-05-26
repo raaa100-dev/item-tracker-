@@ -4,12 +4,13 @@ import Auth from './Auth.jsx'
 import {
   fetchContainers, upsertContainer, deleteContainer,
   fetchSettings, saveSettings, uploadPhoto, deletePhoto,
+  createBlankContainers,
 } from './data'
 import {
   STATUSES, uid, num, money, containerValue, containerProfit,
-  statusClass, shrinkImage, exportCSV,
+  statusClass, shrinkImage, exportCSV, shortCode, expStatus, expLabel, soonestExp, collectExpiring,
 } from './utils'
-import { qrDataUrl, printLabel, printAll } from './print'
+import { qrDataUrl, printLabel, printAll, printBlanks } from './print'
 import { Html5Qrcode } from 'html5-qrcode'
 
 const MAX_PHOTOS = 2
@@ -78,6 +79,62 @@ function Main({ user }) {
     } catch (e) { flash('Save failed') }
   }
 
+  async function quickAddItem(container, newItem) {
+    const updated = { ...container, contents: [...(container.contents || []), newItem] }
+    try {
+      await upsertContainer(user.id, updated)
+      setItems((prev) => {
+        const idx = prev.findIndex((i) => i.id === updated.id)
+        if (idx >= 0) { const c = [...prev]; c[idx] = updated; return c }
+        return [updated, ...prev]
+      })
+      setEditing(updated)
+      flash('Item added')
+      return updated
+    } catch (e) { flash('Could not add item'); return null }
+  }
+
+  // Remove or archive a single item from a container's contents.
+  // mode: 'remove' = delete outright; otherwise log to history with the given reason.
+  // extra: optional fields to merge (e.g. { sale } captured at sell time).
+  async function pullItem(container, index, mode, extra) {
+    const contents = [...(container.contents || [])]
+    const pulled = contents[index]
+    if (!pulled) return
+    contents.splice(index, 1)
+    let history = container.history || []
+    if (mode !== 'remove') {
+      history = [{ ...pulled, ...(extra || {}), pulledAt: Date.now(), reason: mode }, ...history]
+    }
+    const updated = { ...container, contents, history }
+    try {
+      await upsertContainer(user.id, updated)
+      setItems((prev) => {
+        const idx = prev.findIndex((i) => i.id === updated.id)
+        if (idx >= 0) { const c = [...prev]; c[idx] = updated; return c }
+        return prev
+      })
+      setEditing(updated)
+      flash(mode === 'remove' ? 'Item removed' : `Marked ${mode}`)
+      return updated
+    } catch (e) { flash('Could not update'); return null }
+  }
+
+  async function batchCreate(count) {
+    const ids = Array.from({ length: count }, () => uid())
+    try {
+      await createBlankContainers(user.id, ids)
+      const now = Date.now()
+      const blanks = ids.map((id, i) => ({
+        id, name: 'Untitled', location: '', category: '', description: '',
+        expires: '', photos: [], contents: [], history: [], created: now - i,
+      }))
+      setItems((prev) => [...blanks, ...prev])
+      flash(`Created ${count} container${count > 1 ? 's' : ''}`)
+      return ids
+    } catch (e) { flash('Could not create containers'); return null }
+  }
+
   async function removeItem(item) {
     if (!confirm('Delete this container?')) return
     try {
@@ -95,8 +152,11 @@ function Main({ user }) {
     <div className="app">
       {view === 'list' && <ListView {...common} {...{ query, setQuery, sortBy, setSortBy, openDetail, newItem, setView, signOut: () => supabase.auth.signOut() }} />}
       {view === 'form' && <FormView {...common} editing={editing} setEditing={setEditing} onSave={saveItem} onBack={() => (items.find((i) => i.id === editing.id) ? setView('detail') : goList())} />}
-      {view === 'detail' && <DetailView {...common} item={editing} onEdit={() => setView('form')} onDelete={() => removeItem(editing)} onBack={goList} />}
-      {view === 'scan' && <ScanView items={items} onFound={openDetail} onBack={goList} flash={flash} />}
+      {view === 'detail' && <DetailView {...common} item={editing} onEdit={() => setView('form')} onDelete={() => removeItem(editing)} onBack={goList} onQuickAdd={() => setView('quickadd')} onPull={pullItem} />}
+      {view === 'scan' && <ScanView items={items} resellerMode={resellerMode} onFound={openDetail} onBack={goList} flash={flash} onQuickAdd={quickAddItem} />}
+      {view === 'quickadd' && <QuickAddView container={editing} resellerMode={resellerMode} onAdd={quickAddItem} onDone={() => setView('detail')} onBack={() => setView('detail')} />}
+      {view === 'batch' && <BatchView onCreate={batchCreate} onBack={goList} />}
+      {view === 'expiring' && <ExpiringView items={items} resellerMode={resellerMode} onOpen={openDetail} onPull={pullItem} onBack={goList} />}
       {view === 'settings' && <SettingsView resellerMode={resellerMode} toggleReseller={toggleReseller} onBack={goList} signOut={() => supabase.auth.signOut()} email={user.email} />}
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -125,6 +185,7 @@ function ListView({ items, resellerMode, query, setQuery, sortBy, setSortBy, ope
   const total = resellerMode
     ? items.reduce((s, it) => s + containerProfit(it), 0)
     : items.reduce((s, it) => s + containerValue(it), 0)
+  const expiringCount = collectExpiring(items, 30).length
 
   return (
     <>
@@ -140,10 +201,22 @@ function ListView({ items, resellerMode, query, setQuery, sortBy, setSortBy, ope
         </div>
       )}
 
+      {expiringCount > 0 && (
+        <button onClick={() => setView('expiring')}
+          style={{ width: '100%', textAlign: 'left', border: '1px solid var(--danger)', background: 'var(--danger-bg)', color: 'var(--danger)', borderRadius: 'var(--radius)', padding: '12px 15px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 20 }}>⏰</span>
+          <span style={{ flex: 1 }}>{expiringCount} item{expiringCount > 1 ? 's' : ''} expiring soon or expired</span>
+          <span>›</span>
+        </button>
+      )}
+
       <div className="row" style={{ marginBottom: 14 }}>
         <button className="btn primary" onClick={newItem}>＋ New</button>
         <button className="btn" onClick={() => setView('scan')}>▢ Scan</button>
       </div>
+      <button className="btn ghost" onClick={() => setView('batch')} style={{ marginBottom: 14 }}>
+        ⧉ Print blank labels (set up bins later)
+      </button>
 
       {items.length > 0 && (
         <>
@@ -169,6 +242,8 @@ function ListView({ items, resellerMode, query, setQuery, sortBy, setSortBy, ope
 
       {results.map(({ it, hit }) => {
         const cv = containerValue(it)
+        const se = soonestExp(it)
+        const st = expStatus(se)
         return (
           <div key={it.id} className="listcard" onClick={() => openDetail(it.id)}>
             {it.photos && it.photos[0]
@@ -180,6 +255,9 @@ function ListView({ items, resellerMode, query, setQuery, sortBy, setSortBy, ope
                 {it.location ? `📍 ${it.location}` : 'No location'} · {it.contents ? it.contents.length : 0} items{cv ? ` · ${money(cv)}` : ''}
               </p>
               {hit && <p className="ellip" style={{ fontSize: 12, color: 'var(--brand)', margin: '3px 0 0' }}>↳ {hit.join(', ')}</p>}
+              {(st === 'expired' || st === 'soon') && (
+                <span className={`pill ${st}`} style={{ marginTop: 4, display: 'inline-block' }}>{expLabel(se)}</span>
+              )}
             </div>
             <span className="muted">›</span>
           </div>
@@ -238,6 +316,8 @@ function FormView({ editing, setEditing, onSave, onBack, resellerMode, user, fla
       <input value={it.category} onChange={(e) => set('category', e.target.value)} placeholder="e.g. Holiday decorations" style={{ marginBottom: 14 }} />
       <label className="field">Description</label>
       <textarea value={it.description} onChange={(e) => set('description', e.target.value)} placeholder="Optional notes" style={{ marginBottom: 14 }} />
+      <label className="field">Container expiration (optional)</label>
+      <input type="date" value={it.expires || ''} onChange={(e) => set('expires', e.target.value)} style={{ marginBottom: 14 }} />
 
       <label className="field">Photos (up to {MAX_PHOTOS})</label>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
@@ -282,6 +362,8 @@ function FormView({ editing, setEditing, onSave, onBack, resellerMode, user, fla
           ) : (
             <input type="number" step="0.01" value={c.value ?? ''} onChange={(e) => setContent(i, 'value', e.target.value)} placeholder="Value $ (optional)" />
           )}
+          <label className="field" style={{ marginTop: 8 }}>Expiration (optional)</label>
+          <input type="date" value={c.expires || ''} onChange={(e) => setContent(i, 'expires', e.target.value)} />
         </div>
       ))}
       <button className="btn" onClick={addContent} style={{ marginBottom: 22 }}>＋ Add item</button>
@@ -291,11 +373,22 @@ function FormView({ editing, setEditing, onSave, onBack, resellerMode, user, fla
 }
 
 /* ---------------- Detail ---------------- */
-function DetailView({ item, resellerMode, onEdit, onDelete, onBack }) {
+function DetailView({ item, resellerMode, onEdit, onDelete, onBack, onQuickAdd, onPull }) {
   const [qr, setQr] = useState('')
+  const [pullIdx, setPullIdx] = useState(null)   // index of item being pulled (shows action sheet)
+  const [sellIdx, setSellIdx] = useState(null)   // index in sell-price entry mode
+  const [sellPrice, setSellPrice] = useState('')
+  const [showHistory, setShowHistory] = useState(false)
   useEffect(() => { qrDataUrl(item.id).then(setQr) }, [item.id])
   const cv = containerValue(item)
   const profit = containerProfit(item)
+  const cExp = expStatus(item.expires)
+
+  function confirmSell(i, c) {
+    const sale = sellPrice === '' ? c.sale : sellPrice
+    onPull(item, i, 'sold', { sale })
+    setSellIdx(null); setSellPrice(''); setPullIdx(null)
+  }
 
   return (
     <>
@@ -309,13 +402,15 @@ function DetailView({ item, resellerMode, onEdit, onDelete, onBack }) {
         <p className="mono" style={{ marginTop: 10 }}>{item.id}</p>
       </div>
 
-      <div className="row" style={{ marginBottom: 16 }}>
+      <div className="row" style={{ marginBottom: 12 }}>
         <button className="btn" onClick={() => printLabel(item)}>🖨 Print label</button>
         <button className="btn" onClick={onEdit}>✎ Edit</button>
       </div>
+      <button className="btn primary" onClick={onQuickAdd} style={{ marginBottom: 16 }}>＋ Add item to this container</button>
 
       <h2 style={{ fontSize: 18, marginBottom: 8 }}>{item.name}</h2>
       {item.location && <div className="badge brand" style={{ marginBottom: 12 }}>📍 {item.location}</div>}
+      {item.expires && <div style={{ marginBottom: 12 }}><span className={`pill ${cExp}`}>{expLabel(item.expires)}</span></div>}
       <p className="muted" style={{ margin: '0 0 12px' }}>{item.category || 'No category'}</p>
 
       {item.photos && item.photos.length > 0 && (
@@ -342,22 +437,76 @@ function DetailView({ item, resellerMode, onEdit, onDelete, onBack }) {
       <p className="muted" style={{ fontWeight: 500, fontSize: 13, margin: '0 0 6px' }}>Contents ({item.contents ? item.contents.length : 0})</p>
       <div style={{ marginBottom: 22 }}>
         {(!item.contents || !item.contents.length) && <p className="muted" style={{ fontSize: 14 }}>No items listed</p>}
-        {(item.contents || []).map((c, i) => (
+        {(item.contents || []).map((c, i) => {
+          const iExp = expStatus(c.expires)
+          return (
           <div key={i} style={{ padding: '9px 0', borderBottom: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ flex: 1, fontSize: 14 }}>{c.name}{c.qty > 1 ? ` ×${c.qty}` : ''}</span>
               {resellerMode
                 ? <span className={`pill ${statusClass(c.status || 'In stock')}`}>{c.status || 'In stock'}</span>
                 : (c.value ? <span className="muted" style={{ fontSize: 13 }}>{money(num(c.value) * (num(c.qty) || 1))}</span> : null)}
+              <button className="iconbtn" aria-label="Pull item" title="Pull / use / sell" style={{ width: 32, height: 32, fontSize: 15 }} onClick={() => setPullIdx(pullIdx === i ? null : i)}>↗</button>
             </div>
-            {resellerMode && (c.cost || c.sale || c.marketplace || c.sku) && (
-              <p className="muted" style={{ fontSize: 12, margin: '2px 0 0' }}>
-                {c.cost ? `cost ${money(c.cost)}` : ''}{c.sale ? ` · sale ${money(c.sale)}` : ''}{c.marketplace ? ` · ${c.marketplace}` : ''}{c.sku ? ` · ${c.sku}` : ''}
+            {(c.expires || (resellerMode && (c.cost || c.sale || c.marketplace || c.sku))) && (
+              <p className="muted" style={{ fontSize: 12, margin: '3px 0 0', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                {c.expires && <span className={`pill ${iExp}`}>{expLabel(c.expires)}</span>}
+                {resellerMode && (c.cost || c.sale || c.marketplace || c.sku) && (
+                  <span>{c.cost ? `cost ${money(c.cost)}` : ''}{c.sale ? ` · sale ${money(c.sale)}` : ''}{c.marketplace ? ` · ${c.marketplace}` : ''}{c.sku ? ` · ${c.sku}` : ''}</span>
+                )}
               </p>
             )}
+            {pullIdx === i && (
+              <div className="card" style={{ marginTop: 8, padding: 12 }}>
+                {sellIdx === i ? (
+                  <>
+                    <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>Sold “{c.name}” for how much?</p>
+                    <input type="number" step="0.01" autoFocus value={sellPrice}
+                      onChange={(e) => setSellPrice(e.target.value)} placeholder={c.sale ? `${c.sale}` : 'Sale price $'}
+                      style={{ marginBottom: 10 }} onKeyDown={(e) => e.key === 'Enter' && confirmSell(i, c)} />
+                    <div className="row">
+                      <button className="btn primary" onClick={() => confirmSell(i, c)}>Confirm sale</button>
+                      <button className="btn ghost" onClick={() => { setSellIdx(null); setSellPrice('') }}>Cancel</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="muted" style={{ fontSize: 13, margin: '0 0 10px' }}>Pull “{c.name}” out — what happened to it?</p>
+                    <div className="row" style={{ marginBottom: 8 }}>
+                      <button className="btn" onClick={() => { onPull(item, i, 'used'); setPullIdx(null) }}>Used</button>
+                      <button className="btn" onClick={() => { setSellIdx(i); setSellPrice(c.sale ?? '') }}>Sold</button>
+                    </div>
+                    <div className="row">
+                      <button className="btn danger" onClick={() => { onPull(item, i, 'remove'); setPullIdx(null) }}>Remove</button>
+                      <button className="btn ghost" onClick={() => setPullIdx(null)}>Cancel</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
-        ))}
+        )})}
       </div>
+
+      {(item.history && item.history.length > 0) && (
+        <div style={{ marginBottom: 22 }}>
+          <button className="btn ghost" onClick={() => setShowHistory(!showHistory)} style={{ justifyContent: 'space-between' }}>
+            <span>Pulled / used / sold ({item.history.length})</span>
+            <span className="muted">{showHistory ? '▲' : '▼'}</span>
+          </button>
+          {showHistory && (
+            <div style={{ marginTop: 8 }}>
+              {item.history.map((h, i) => (
+                <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ flex: 1, fontSize: 14 }}>{h.name}{h.qty > 1 ? ` ×${h.qty}` : ''}{h.reason === 'sold' && h.sale ? ` · ${money(h.sale)}` : ''}</span>
+                  <span className={`pill ${h.reason === 'sold' ? 'sold' : 'used'}`}>{h.reason}</span>
+                  <span className="muted" style={{ fontSize: 12 }}>{h.pulledAt ? new Date(h.pulledAt).toLocaleDateString() : ''}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <button className="btn danger" onClick={onDelete}>🗑 Delete container</button>
     </>
@@ -365,24 +514,25 @@ function DetailView({ item, resellerMode, onEdit, onDelete, onBack }) {
 }
 
 /* ---------------- Scan ---------------- */
-function ScanView({ items, onFound, onBack, flash }) {
+function ScanView({ items, resellerMode, onFound, onBack, flash, onQuickAdd }) {
   const [err, setErr] = useState('')
   const [notFound, setNotFound] = useState('')
-  const scannerRef = useRef(null)
+  const [matched, setMatched] = useState(null)   // container found by scan, awaiting choice
+  const [adding, setAdding] = useState(false)     // showing quick-add form for matched
 
   useEffect(() => {
+    if (matched || adding) return   // camera off once we've matched
     let scanner
     const id = 'qr-reader'
     const start = async () => {
       try {
         scanner = new Html5Qrcode(id)
-        scannerRef.current = scanner
         await scanner.start(
           { facingMode: 'environment' },
           { fps: 10, qrbox: { width: 220, height: 220 } },
           (text) => {
             const found = items.find((i) => i.id === text)
-            stop().then(() => { if (found) onFound(found.id); else setNotFound(text) })
+            stop().then(() => { if (found) setMatched(found); else setNotFound(text) })
           },
           () => {}
         )
@@ -396,7 +546,24 @@ function ScanView({ items, onFound, onBack, flash }) {
     }
     start()
     return () => { stop() }
-  }, [items])
+  }, [items, matched, adding])
+
+  function rescan() { setMatched(null); setNotFound(''); setAdding(false) }
+
+  if (adding && matched) {
+    return (
+      <QuickAddView
+        container={matched}
+        resellerMode={resellerMode}
+        onAdd={onQuickAdd}
+        onBack={() => setAdding(false)}
+        onDone={() => { setAdding(false); }}
+        afterAddLabel="Scan another container"
+        onAfterAll={rescan}
+        embeddedTitle={`Add to “${matched.name}”`}
+      />
+    )
+  }
 
   return (
     <>
@@ -404,7 +571,23 @@ function ScanView({ items, onFound, onBack, flash }) {
         <button className="iconbtn" aria-label="Back" onClick={onBack}>‹</button>
         <h1>Scan a code</h1>
       </div>
-      {!notFound ? (
+
+      {matched ? (
+        <div className="full-center center" style={{ gap: 18 }}>
+          <div style={{ fontSize: 36 }}>✅</div>
+          <div>
+            <p style={{ fontWeight: 500, margin: 0, fontSize: 18 }}>{matched.name}</p>
+            <p className="muted" style={{ margin: '4px 0 0' }}>
+              {matched.location ? `📍 ${matched.location} · ` : ''}{(matched.contents || []).length} items
+            </p>
+          </div>
+          <div style={{ width: '100%', maxWidth: 320 }}>
+            <button className="btn primary" style={{ marginBottom: 10 }} onClick={() => setAdding(true)}>＋ Add an item here</button>
+            <button className="btn" style={{ marginBottom: 10 }} onClick={() => onFound(matched.id)}>Open container</button>
+            <button className="btn ghost" onClick={rescan}>Scan another</button>
+          </div>
+        </div>
+      ) : !notFound ? (
         <>
           <div id="qr-reader" style={{ width: '100%', borderRadius: 14, overflow: 'hidden', background: '#000' }} />
           <p className="center muted" style={{ fontSize: 13, marginTop: 12 }}>
@@ -415,7 +598,216 @@ function ScanView({ items, onFound, onBack, flash }) {
         <div className="full-center center muted">
           <div style={{ fontSize: 36 }}>❔</div>
           <p>Scanned code <span className="mono">{notFound}</span><br />doesn’t match any container.</p>
-          <button className="btn" style={{ width: 'auto' }} onClick={() => setNotFound('')}>Scan again</button>
+          <button className="btn" style={{ width: 'auto' }} onClick={rescan}>Scan again</button>
+        </div>
+      )}
+    </>
+  )
+}
+
+/* ---------------- Quick add item ---------------- */
+function QuickAddView({ container, resellerMode, onAdd, onBack, onDone, afterAddLabel, onAfterAll, embeddedTitle }) {
+  const [c, setC] = useState({ name: '', qty: 1, status: 'In stock' })
+  const [justAdded, setJustAdded] = useState(0)   // count added this session
+  const [busy, setBusy] = useState(false)
+  const set = (k, v) => setC((p) => ({ ...p, [k]: v }))
+
+  async function add(stayOnScreen) {
+    if (!(c.name || '').trim()) return
+    setBusy(true)
+    const ok = await onAdd(container, { ...c, name: c.name.trim() })
+    setBusy(false)
+    if (!ok) return
+    setJustAdded((n) => n + 1)
+    setC({ name: '', qty: 1, status: 'In stock' })
+    if (!stayOnScreen) onDone()
+  }
+
+  return (
+    <>
+      <div className="topbar">
+        <button className="iconbtn" aria-label="Back" onClick={onBack}>‹</button>
+        <h1 style={{ fontSize: 18 }}>{embeddedTitle || `Add to “${container.name}”`}</h1>
+      </div>
+
+      {container.location && <div className="badge brand" style={{ marginBottom: 14 }}>📍 {container.location}</div>}
+      {justAdded > 0 && (
+        <p className="muted" style={{ fontSize: 13, marginTop: 0, marginBottom: 14 }}>
+          Added {justAdded} item{justAdded > 1 ? 's' : ''} so far. Container now has {(container.contents || []).length}.
+        </p>
+      )}
+
+      <label className="field">Item name</label>
+      <input value={c.name} autoFocus onChange={(e) => set('name', e.target.value)}
+        placeholder="e.g. Cordless drill" style={{ marginBottom: 14 }}
+        onKeyDown={(e) => e.key === 'Enter' && add(true)} />
+
+      <div className="row" style={{ marginBottom: 14 }}>
+        <div style={{ flex: 1 }}>
+          <label className="field">Quantity</label>
+          <input type="number" min="1" value={c.qty} onChange={(e) => set('qty', e.target.value)} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <label className="field">Expiration (optional)</label>
+          <input type="date" value={c.expires || ''} onChange={(e) => set('expires', e.target.value)} />
+        </div>
+      </div>
+      {!resellerMode && (
+        <div style={{ marginBottom: 14 }}>
+          <label className="field">Value $ (optional)</label>
+          <input type="number" step="0.01" value={c.value ?? ''} onChange={(e) => set('value', e.target.value)} />
+        </div>
+      )}
+
+      {resellerMode && (
+        <>
+          <div className="row" style={{ marginBottom: 14 }}>
+            <div style={{ flex: 1 }}>
+              <label className="field">Cost $</label>
+              <input type="number" step="0.01" value={c.cost ?? ''} onChange={(e) => set('cost', e.target.value)} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label className="field">Sale $</label>
+              <input type="number" step="0.01" value={c.sale ?? ''} onChange={(e) => set('sale', e.target.value)} />
+            </div>
+          </div>
+          <div className="row" style={{ marginBottom: 14 }}>
+            <div style={{ flex: 1 }}>
+              <label className="field">Marketplace</label>
+              <input value={c.marketplace || ''} onChange={(e) => set('marketplace', e.target.value)} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label className="field">SKU</label>
+              <input value={c.sku || ''} onChange={(e) => set('sku', e.target.value)} />
+            </div>
+          </div>
+          <label className="field">Status</label>
+          <select value={c.status} onChange={(e) => set('status', e.target.value)} style={{ marginBottom: 14 }}>
+            {STATUSES.map((s) => <option key={s}>{s}</option>)}
+          </select>
+        </>
+      )}
+
+      <button className="btn primary" disabled={busy} onClick={() => add(true)} style={{ marginBottom: 10 }}>
+        {busy ? 'Adding…' : '＋ Add & keep going'}
+      </button>
+      <button className="btn" onClick={() => add(false)} style={{ marginBottom: 10 }}>Add & finish</button>
+      {onAfterAll && <button className="btn ghost" onClick={onAfterAll}>{afterAddLabel || 'Done'}</button>}
+    </>
+  )
+}
+
+
+/* ---------------- Expiring dashboard ---------------- */
+function ExpiringView({ items, resellerMode, onOpen, onPull, onBack }) {
+  const [days, setDays] = useState(30)
+  const list = collectExpiring(items, days)
+  const expired = list.filter((x) => x.status === 'expired')
+  const soon = list.filter((x) => x.status === 'soon')
+
+  function pullByRef(ref, mode) {
+    const container = items.find((i) => i.id === ref.containerId)
+    if (!container) return
+    onPull(container, ref.index, mode)
+  }
+
+  const Section = ({ title, rows, tone }) => (
+    rows.length > 0 && (
+      <>
+        <p style={{ fontWeight: 500, fontSize: 14, margin: '16px 0 8px', color: tone }}>{title} ({rows.length})</p>
+        {rows.map((x, i) => (
+          <div key={i} className="card" style={{ marginBottom: 10, padding: '12px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ flex: 1, fontSize: 15 }}>{x.name}{x.qty > 1 ? ` ×${x.qty}` : ''}</span>
+              <span className={`pill ${x.status}`}>{expLabel(x.expires)}</span>
+            </div>
+            <p className="muted" style={{ fontSize: 13, margin: '6px 0 0' }}>
+              in <strong>{x.containerName}</strong>{x.location ? ` · 📍 ${x.location}` : ''}
+            </p>
+            <div className="row" style={{ marginTop: 10 }}>
+              <button className="btn" onClick={() => onOpen(x.containerId)}>Open box</button>
+              {x.kind === 'item' && <button className="btn" onClick={() => pullByRef(x, 'used')}>Mark used</button>}
+            </div>
+          </div>
+        ))}
+      </>
+    )
+  )
+
+  return (
+    <>
+      <div className="topbar">
+        <button className="iconbtn" aria-label="Back" onClick={onBack}>‹</button>
+        <h1 style={{ fontSize: 18 }}>Expiring soon</h1>
+      </div>
+
+      <label className="field">Show items expiring within</label>
+      <select value={days} onChange={(e) => setDays(parseInt(e.target.value))} style={{ marginBottom: 8 }}>
+        <option value={7}>7 days</option>
+        <option value={14}>14 days</option>
+        <option value={30}>30 days</option>
+        <option value={60}>60 days</option>
+        <option value={90}>90 days</option>
+      </select>
+
+      {!list.length && (
+        <div className="full-center center muted">
+          <div style={{ fontSize: 36 }}>✅</div>
+          <p>Nothing expired or expiring in this window.</p>
+        </div>
+      )}
+
+      <Section title="Expired" rows={expired} tone="var(--danger)" />
+      <Section title="Expiring soon" rows={soon} tone="var(--warn-text)" />
+    </>
+  )
+}
+
+/* ---------------- Batch blank labels ---------------- */
+function BatchView({ onCreate, onBack }) {
+  const [count, setCount] = useState(10)
+  const [busy, setBusy] = useState(false)
+  const [createdIds, setCreatedIds] = useState(null)
+
+  async function make() {
+    const n = Math.max(1, Math.min(100, parseInt(count) || 1))
+    setBusy(true)
+    const ids = await onCreate(n)
+    setBusy(false)
+    if (ids) setCreatedIds(ids)
+  }
+
+  return (
+    <>
+      <div className="topbar">
+        <button className="iconbtn" aria-label="Back" onClick={onBack}>‹</button>
+        <h1 style={{ fontSize: 18 }}>Print blank labels</h1>
+      </div>
+
+      {!createdIds ? (
+        <>
+          <p className="muted" style={{ fontSize: 14, marginTop: 0, lineHeight: 1.6 }}>
+            Make a batch of empty containers and print their QR codes now. Stick them on
+            your bins, then scan each one later to set its location and add items — no need
+            to fill anything in first.
+          </p>
+          <label className="field" style={{ marginTop: 8 }}>How many?</label>
+          <input type="number" min="1" max="100" value={count}
+            onChange={(e) => setCount(e.target.value)} style={{ marginBottom: 16 }} />
+          <button className="btn primary" disabled={busy} onClick={make}>
+            {busy ? 'Creating…' : `Create ${Math.max(1, Math.min(100, parseInt(count) || 1))} blank containers`}
+          </button>
+        </>
+      ) : (
+        <div className="center" style={{ paddingTop: 8 }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>✅</div>
+          <p style={{ marginTop: 0 }}>{createdIds.length} blank containers created.</p>
+          <p className="muted" style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 18 }}>
+            Each label shows a short code (like {shortCode(createdIds[0])}) so you can tell
+            them apart. Print them, stick them on, and scan to set up each bin.
+          </p>
+          <button className="btn primary" style={{ marginBottom: 10 }} onClick={() => printBlanks(createdIds)}>🖨 Print these labels</button>
+          <button className="btn" onClick={onBack}>Done</button>
         </div>
       )}
     </>

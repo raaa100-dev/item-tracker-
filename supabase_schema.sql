@@ -11,11 +11,17 @@ create table if not exists public.containers (
   location    text default '',
   category    text default '',
   description text default '',
+  expires     date,                                 -- optional container-level expiration
   photos      jsonb not null default '[]'::jsonb,   -- array of public image URLs
-  contents    jsonb not null default '[]'::jsonb,   -- array of item objects
+  contents    jsonb not null default '[]'::jsonb,   -- array of item objects (may carry per-item "expires")
+  history     jsonb not null default '[]'::jsonb,   -- pulled/used/sold items, kept for the record
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
+
+-- If you created the table on an earlier version, add the new columns safely:
+alter table public.containers add column if not exists expires date;
+alter table public.containers add column if not exists history jsonb not null default '[]'::jsonb;
 
 -- Per-user settings (e.g. reseller mode on/off).
 create table if not exists public.settings (

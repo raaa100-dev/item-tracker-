@@ -86,6 +86,10 @@ label.field { font-size: 13px; color: var(--text-2); display: block; margin-bott
 .pill.stock { background: var(--brand-bg); color: var(--brand-text); }
 .pill.listed { background: var(--warn-bg); color: var(--warn-text); }
 .pill.sold, .pill.shipped { background: var(--ok-bg); color: var(--ok-text); }
+.pill.expired { background: var(--danger-bg); color: var(--danger); }
+.pill.soon { background: var(--warn-bg); color: var(--warn-text); }
+.pill.ok { background: var(--ok-bg); color: var(--ok-text); }
+.pill.used { background: var(--surface-2); color: var(--text-2); }
 
 .search { position: relative; }
 .search .ico { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-3); font-size: 17px; }

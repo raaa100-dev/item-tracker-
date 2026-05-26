@@ -32,6 +32,8 @@ Total time: about 30–45 minutes the first time. No prior experience needed.
    Open the file `supabase_schema.sql` from this project, copy ALL of it, paste it
    into the editor, and click **Run**. This creates your tables, security rules,
    and the photo storage bucket. You should see "Success".
+   (If you set up an earlier version of this app, just run the script again — it
+   safely adds the new expiration and history columns without touching your data.)
 4. In the left sidebar, open **Project Settings** (gear) → **API**.
    Copy two values — you'll need them in Part 2:
    - **Project URL** (looks like `https://abcd1234.supabase.co`)

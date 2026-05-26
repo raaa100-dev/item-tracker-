@@ -19,8 +19,10 @@ export async function upsertContainer(userId, item) {
     location: item.location || '',
     category: item.category || '',
     description: item.description || '',
+    expires: item.expires || null,
     photos: item.photos || [],
     contents: item.contents || [],
+    history: item.history || [],
   }
   const { error } = await supabase.from('containers').upsert(row)
   if (error) throw error
@@ -31,6 +33,16 @@ export async function deleteContainer(id) {
   if (error) throw error
 }
 
+// Create N blank containers at once (for batch-printing blank QR labels).
+export async function createBlankContainers(userId, ids) {
+  const rows = ids.map((id) => ({
+    id, user_id: userId, name: 'Untitled', location: '', category: '',
+    description: '', expires: null, photos: [], contents: [], history: [],
+  }))
+  const { error } = await supabase.from('containers').insert(rows)
+  if (error) throw error
+}
+
 function rowToItem(r) {
   return {
     id: r.id,
@@ -38,8 +50,10 @@ function rowToItem(r) {
     location: r.location || '',
     category: r.category || '',
     description: r.description || '',
+    expires: r.expires || '',
     photos: r.photos || [],
     contents: r.contents || [],
+    history: r.history || [],
     created: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
   }
 }
