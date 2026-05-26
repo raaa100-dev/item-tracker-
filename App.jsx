@@ -6,7 +6,7 @@ import {
   fetchSettings, saveSettings, uploadPhoto, deletePhoto,
   createBlankContainers,
   fetchHouseholds, createHousehold, joinHouseholdByCode,
-  fetchMembers, leaveHousehold, removeMember, deleteHousehold, inviteByEmail,
+  fetchMembers, leaveHousehold, removeMember, setMemberRole, deleteHousehold, inviteByEmail,
 } from './data'
 import {
   STATUSES, uid, num, money, containerValue, containerProfit,
@@ -1052,6 +1052,10 @@ function HouseholdsView({ user, households, space, setSpace, reload, onBack, fla
     try { await removeMember(manage.id, uid2); setMembers(await fetchMembers(manage.id)); flash('Member removed') }
     catch (e) { flash('Could not remove') }
   }
+  async function changeRole(uid2, role) {
+    try { await setMemberRole(manage.id, uid2, role); setMembers(await fetchMembers(manage.id)); flash(role === 'owner' ? 'Promoted to owner' : 'Set to member') }
+    catch (e) { flash('Could not change role') }
+  }
   async function leave(h) {
     if (!confirm(`Leave “${h.name}”?`)) return
     try { await leaveHousehold(user.id, h.id); if (space === h.id) setSpace(null); await reload(); setManage(null); flash('Left household') }
@@ -1093,7 +1097,14 @@ function HouseholdsView({ user, households, space, setSpace, reload, onBack, fla
               <p className="ellip" style={{ margin: 0, fontSize: 14 }}>{m.email || m.user_id.slice(0, 8)}</p>
               <p className="muted" style={{ fontSize: 12, margin: '2px 0 0' }}>{m.role}{m.user_id === user.id ? ' · you' : ''}</p>
             </div>
-            {isOwner && m.user_id !== user.id && <button className="btn ghost" style={{ width: 'auto', color: 'var(--danger)' }} onClick={() => kick(m.user_id)}>Remove</button>}
+            {isOwner && m.user_id !== user.id && (
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                {m.role === 'owner'
+                  ? <button className="btn ghost" style={{ width: 'auto', padding: '6px 10px' }} onClick={() => changeRole(m.user_id, 'member')}>Make member</button>
+                  : <button className="btn ghost" style={{ width: 'auto', padding: '6px 10px' }} onClick={() => changeRole(m.user_id, 'owner')}>Make owner</button>}
+                <button className="btn ghost" style={{ width: 'auto', padding: '6px 10px', color: 'var(--danger)' }} onClick={() => kick(m.user_id)}>Remove</button>
+              </div>
+            )}
           </div>
         ))}
 

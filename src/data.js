@@ -146,6 +146,13 @@ export async function removeMember(householdId, userId) {
   if (error) throw error
 }
 
+// Promote a member to 'owner' or demote to 'member'.
+export async function setMemberRole(householdId, userId, role) {
+  const { error } = await supabase
+    .from('household_members').update({ role }).eq('household_id', householdId).eq('user_id', userId)
+  if (error) throw error
+}
+
 export async function deleteHousehold(householdId) {
   const { error } = await supabase.from('households').delete().eq('id', householdId)
   if (error) throw error

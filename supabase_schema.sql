@@ -76,6 +76,9 @@ returns boolean language sql security definer stable as $$
   select exists (
     select 1 from public.households hh
     where hh.id = h and hh.owner_id = auth.uid()
+  ) or exists (
+    select 1 from public.household_members m
+    where m.household_id = h and m.user_id = auth.uid() and m.role = 'owner'
   );
 $$;
 
@@ -181,6 +184,10 @@ create policy "insert members" on public.household_members
 drop policy if exists "delete members" on public.household_members;
 create policy "delete members" on public.household_members
   for delete using (user_id = auth.uid() or public.is_household_owner(household_id));
+
+drop policy if exists "update members" on public.household_members;
+create policy "update members" on public.household_members
+  for update using (public.is_household_owner(household_id));
 
 drop policy if exists "view invites" on public.household_invites;
 create policy "view invites" on public.household_invites
